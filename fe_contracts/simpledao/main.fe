@@ -1,0 +1,415 @@
+use std::buf::{RawCallBuffer, MemoryBufferWriter}
+use address_array::{AddressArray}
+use snake_token::{SnakeToken}
+use interfaces::ERC20
+
+// The following implementation is based on the following solidity implementation
+// https://github.com/OpenZeppelin/gnosis-multisig/blob/master/contracts/MultiSigWallet.sol
+
+const MAX_OWNER_COUNT: u8 = 50
+const TX_MAX_DATA_SIZE: u256 = 1024
+
+type TransactionData = Array<u8, { TX_MAX_DATA_SIZE }>
+
+// Events
+struct Confirmation {
+    #indexed
+    pub owner: address
+    #indexed
+    pub tx_id: u256
+}
+
+struct Revocation {
+    #indexed
+    pub owner: address
+    #indexed
+    pub tx_id: u256
+}
+
+struct Submission {
+    #indexed
+    pub tx_id: u256
+}
+
+struct Execution {
+    #indexed
+    pub tx_id: u256
+}
+
+struct ExecutionFailure {
+    #indexed
+    pub tx_id: u256
+}
+
+struct OwnerAddition {
+    #indexed
+    pub owner: address
+}
+
+struct OwnerRemoval {
+    #indexed
+    pub owner: address
+}
+
+struct RequirementChange {
+    #indexed
+    pub required: u256
+}
+
+struct Transaction {
+    pub destination: address
+    pub value: u256
+    pub data: TransactionData
+    pub data_length: u16
+    pub executed: bool
+}
+
+fn tx_to_buffer(tx: Transaction) -> RawCallBuffer {
+    let mut buf: RawCallBuffer = RawCallBuffer::new(
+        input_len: tx.data_length,
+        output_len: 0
+    )
+    let mut writer: MemoryBufferWriter = buf.writer()
+    let mut i: u256 = 0
+    while i < tx.data_length {
+        writer.write(value: tx.data[i])
+        i += 1
+    }
+    return buf
+}
+
+enum Governance {
+    Multisig
+    WeightedMultisig(ERC20)
+}
+
+contract SimpleDAO {
+    tx_count: u256
+    transactions: Map<u256, Transaction>
+    confirmations: Map<u256, Map<address, bool>>
+    required_weight: u256
+    owners: AddressArray
+    is_owner: Map<address, bool>
+    weight: Map<address, u256>
+    total_weight: u256
+    governance: Governance
+
+    // Contract constructor sets initial owners and required number of confirmations.
+    pub fn __init__(mut self, ctx: Context, owners: Array<address, { MAX_OWNER_COUNT }>, required_weight: u256) {
+        let mut tmp: AddressArray = AddressArray::new()
+        for owner in owners {
+            // TODO: Look into this
+            if owner != 0 and not self.is_owner[owner] {
+                tmp.push(owner)
+                self.is_owner[owner] = true
+            }
+        }
+        self.owners = tmp
+        self.governance = Governance::Multisig
+        self.required_weight = required_weight
+        self.update_weights(ctx)
+    }
+
+    /// Set the governance token to be used for weighted multisig mode
+    pub fn set_governance_token(mut self, ctx: Context, gov_token: ERC20) {
+        self.validate_only_wallet(ctx)
+        self.governance = Governance::WeightedMultisig(gov_token)
+        self.update_weights(ctx)
+    }
+
+    /// Distribute governance tokens to the given receivers
+    /// For as long as Fe does not support dynamically sized arrays, this is limited to 10 receivers at a time
+    pub fn distribute_governance_token(mut self, ctx: Context, receivers: Array<(address, u256), { 10 }>) {
+        self.validate_only_wallet(ctx)
+        match self.governance {
+            Governance::Multisig => {
+                revert
+            }
+            Governance::WeightedMultisig(gov_token) => {
+                for pair in receivers {
+                    let (to, amount):(address, u256) = pair
+                    if to != 0 and amount > 0{
+                        gov_token.transfer(to, amount)
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn update_weights(mut self, ctx: Context) {
+        match self.governance {
+            Governance::Multisig => {
+                self.set_fallback_weights()
+            }
+            Governance::WeightedMultisig(gov_token) => {
+                // TODO: Split this into private and public function
+                //self.validate_only_wallet(ctx)
+                let mut total_weight: u256 = 0
+                for owner in self.owners.to_mem().data() {
+                    if owner == 0 {
+                        continue
+                    }
+                    let owner_balance: u256 = gov_token.balanceOf(owner)
+                    self.weight[owner] = owner_balance
+                    total_weight += owner_balance
+                }
+
+                if total_weight == 0 {
+                    self.set_fallback_weights()
+                } else {
+                    self.total_weight = total_weight
+                }
+            }
+        }
+    }
+
+    /// Allows to add a new owner. Transaction has to be sent by wallet.
+    pub fn add_owner(mut self, mut ctx: Context, owner: address) {
+        self.validate_only_wallet(ctx)
+        self.validate_owner_does_not_exist(owner)
+        self.validate_not_null(owner)
+        self.validate_valid_requirement(self.owners.to_mem().length() + 1, self.required_weight)
+
+        self.is_owner[owner] = true
+        let mut tmp: AddressArray = self.owners.to_mem()
+        tmp.push(owner)
+        self.owners = tmp
+        ctx.emit(OwnerAddition(owner))
+        // This would be wasteful if multiple owners were added repeatedly, but we choose safety over gas efficiency
+        self.update_weights(ctx)
+    }
+
+    /// Allows to remove an owner. Transaction has to be sent by wallet.
+    pub fn remove_owner(mut self, mut ctx: Context, owner: address) {
+        self.validate_only_wallet(ctx)
+        self.validate_owner_exists(owner)
+        self.is_owner[owner] = false
+        self.weight[owner] = 0
+        let mut tmp: AddressArray = self.owners.to_mem()
+        tmp.remove(owner)
+
+        if self.required_weight > tmp.length() {
+            self.change_requirement(ctx, required: tmp.length())
+        }
+
+        self.owners = tmp
+        ctx.emit(OwnerRemoval(owner))
+        // This would be wasteful if multiple owners were removed repeatedly, but we choose safety over gas efficiency
+        self.update_weights(ctx)
+    }
+
+    /// Allows to replace an owner with a new owner. Transaction has to be sent by wallet.
+    /// `update_weights` should be called after calling this. TODO: Maybe remove this API entirely?
+    pub fn replace_owner(mut self, mut ctx: Context, owner: address, new_owner: address) {
+        self.validate_only_wallet(ctx)
+        self.validate_owner_exists(owner)
+        self.validate_owner_does_not_exist(new_owner)
+        let mut tmp: AddressArray = self.owners.to_mem()
+        tmp.remove(owner)
+        tmp.push(new_owner)
+        self.owners = tmp
+        self.is_owner[owner] = false
+        self.weight[owner] = 0
+        self.is_owner[new_owner] = true
+        ctx.emit(OwnerRemoval(owner))
+        ctx.emit(OwnerAddition(owner: new_owner))
+    }
+
+    /// Allows to change the number of required confirmations. Transaction has to be sent by wallet.
+    pub fn change_requirement(mut self, mut ctx: Context, required: u256) {
+        self.required_weight = required
+        ctx.emit(RequirementChange(required))
+    }
+
+    /// Allows an owner to submit and confirm a transaction.
+    pub fn submit_transaction(
+        mut self,
+        mut ctx: Context,
+        destination: address,
+        value: u256,
+        data: TransactionData,
+        data_length: u16,
+    ) -> u256 {
+        let tx_id: u256 = self.add_transaction(ctx, destination, value, data, data_length)
+        self.confirm_transaction(ctx, tx_id)
+        return tx_id
+    }
+
+    /// Allows an owner to confirm a transaction
+    pub fn confirm_transaction(mut self, mut ctx: Context, tx_id: u256) {
+        self.validate_owner_exists(ctx.msg_sender())
+        self.validate_tx_exists(tx_id)
+        self.validate_not_confirmed(tx_id, ctx.msg_sender())
+
+        self.confirmations[tx_id][ctx.msg_sender()] = true
+        ctx.emit(Confirmation(owner: ctx.msg_sender(), tx_id))
+        self.execute_transaction(ctx, tx_id)
+    }
+
+    /// Allows an owner to revoke a confirmation for a transaction.
+    pub fn revoke_confirmation(mut self, mut ctx: Context, tx_id: u256) {
+        self.validate_owner_exists(ctx.msg_sender())
+        self.validate_tx_exists(tx_id)
+        self.validate_confirmed(tx_id, ctx.msg_sender())
+
+        self.confirmations[tx_id][ctx.msg_sender()] = false
+        ctx.emit(Revocation(owner: ctx.msg_sender(), tx_id))
+    }
+
+    /// Allows anyone to execute a confirmed transaction.
+    pub fn execute_transaction(mut self, mut ctx: Context, tx_id: u256) {
+        self.validate_not_executed(tx_id)
+        self.validate_owner_exists(ctx.msg_sender())
+        self.validate_confirmed(tx_id, ctx.msg_sender())
+
+        if self.is_confirmed(tx_id) {
+            let mut tx: Transaction = self.transactions[tx_id].to_mem()
+            self.transactions[tx_id].executed = true
+            let mut buf: RawCallBuffer = tx_to_buffer(tx)
+            if ctx.raw_call(addr: tx.destination, value: tx.value, buf) {
+                ctx.emit(Execution(tx_id))
+            } else {
+                ctx.emit(ExecutionFailure(tx_id))
+                self.transactions[tx_id].executed = false
+            }
+        }
+    }
+
+    /// Returns the confirmation status of a transaction.
+    pub fn is_confirmed(self, tx_id: u256) -> bool {
+        let mut weight: u256 = 0
+        for owner in self.owners.to_mem().data() {
+            if self.confirmations[tx_id][owner] {
+                weight += self.weight[owner]
+            }
+            if weight == self.required_weight {
+                return true
+            }
+        }
+        return false
+    }
+
+    // Public readonly functions
+
+    /// Returns list of owners
+    pub fn get_owners(self) -> Array<address, { MAX_OWNER_COUNT }> {
+        return self.owners.to_mem().data()
+    }
+
+    /// Returns the weight of the owner
+    pub fn get_weight(self, owner: address) -> u256 {
+        return self.weight[owner]
+    }
+
+    // Returns the total weight of all owners
+    pub fn get_total_weight(self) -> u256 {
+        return self.total_weight
+    }
+
+    /// Returns a fixed size array containing the addresses that have confirmed the given tx_id
+    pub fn get_confirmations(self, tx_id: u256) -> Array<address, { MAX_OWNER_COUNT }> {
+        let mut confirmations: Array<address, { MAX_OWNER_COUNT }> = [address(0); MAX_OWNER_COUNT]
+        let mut i_match: u256 = 0
+        for owner in self.owners.to_mem().data() {
+            if self.confirmations[tx_id][owner] {
+                confirmations[i_match] = owner
+                i_match += 1
+            }
+        }
+        return confirmations
+    }
+
+    // Internal functions
+
+    // Gives each owner an equal weight of 1
+    fn set_fallback_weights(mut self) {
+        let mut total_weight: u256 = 0
+        for owner in self.owners.to_mem().data() {
+            if owner == 0 {
+                continue
+            }
+            self.weight[owner] = 1
+            total_weight += 1
+        }
+        self.total_weight = total_weight
+    }
+
+    fn add_transaction(
+        mut self,
+        mut ctx: Context,
+        destination: address,
+        value: u256,
+        data: TransactionData,
+        data_length: u16,
+    ) -> u256 {
+        self.validate_not_null(destination)
+        let tx_id: u256 = self.tx_count
+        self.transactions[tx_id] = Transaction(
+            destination,
+            value,
+            data,
+            data_length,
+            executed: false,
+        )
+        self.tx_count += 1
+        ctx.emit(Submission(tx_id))
+        return tx_id
+    }
+
+    // Internal validation methods
+
+    fn validate_not_executed(self, _ tx_id: u256) {
+        if self.transactions[tx_id].executed {
+            revert
+        }
+    }
+
+    fn validate_owner_exists(self, _ owner: address) {
+        if not self.is_owner[owner] {
+            revert
+        }
+    }
+
+    fn validate_owner_does_not_exist(self, _ owner: address) {
+        if self.is_owner[owner] {
+            revert
+        }
+    }
+
+    fn validate_confirmed(self, _ tx_id: u256, _ owner: address) {
+        if not self.confirmations[tx_id][owner] {
+            revert
+        }
+    }
+
+    fn validate_not_confirmed(self, _ tx_id: u256, _ owner: address) {
+        if self.confirmations[tx_id][owner] {
+            revert
+        }
+    }
+
+    fn validate_tx_exists(self, _ tx_id: u256) {
+        if self.transactions[tx_id].destination == 0 {
+            revert
+        }
+    }
+
+    fn validate_only_wallet(self, ctx: Context) {
+        if ctx.msg_sender() != ctx.self_address() {
+            revert
+        }
+    }
+
+    fn validate_not_null(self, _ addr: address) {
+        if addr == 0 {
+            revert
+        }
+    }
+
+    fn validate_valid_requirement(self, _ owner_count: u256, _ required: u256) {
+        if owner_count > MAX_OWNER_COUNT or required > self.total_weight or required == 0 or owner_count == 0 {
+            revert
+        }
+    }
+
+}

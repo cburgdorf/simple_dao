@@ -1,0 +1,10 @@
+// Poor man's interface because current Fe has no interfaces yet
+pub contract ERC20 {
+    pub fn balanceOf(self, _ account: address) -> u256 {
+        revert
+    }
+
+    pub fn transfer(self, to: address, _ amount: u256) -> bool {
+        revert
+    }
+}
