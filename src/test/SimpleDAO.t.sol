@@ -36,8 +36,6 @@ contract SimpleDAOTest is Test {
     event OwnerAddition(address indexed owner);
     event OwnerRemoval(address indexed owner);
 
-    string[] scratchpad;
-
     ISimpleDAO public multisig;
     IERC20 public gov_token;
 
@@ -271,8 +269,7 @@ contract SimpleDAOTest is Test {
       // Show that SECOND OWNER can not execute something without FIRST OWNER
 
 
-      scratchpad = ["cast", "calldata", "set_governance_token(address)", Strings.toHexString(address(gov_token))];
-      bytes memory set_gov_token_tx = vm.ffi(scratchpad);
+      bytes memory set_gov_token_tx = abi.encodeWithSelector(multisig.set_governance_token.selector, address(gov_token));
       bytes memory padded_tx = pad_to_length(set_gov_token_tx, DATA_LENGTH);
 
       vm.startPrank(FIRST_OWNER);
@@ -282,9 +279,12 @@ contract SimpleDAOTest is Test {
       vm.startPrank(SECOND_OWNER);
       multisig.confirm_transaction(tx_id);
 
-      scratchpad = ["cast", "calldata", "distribute_governance_token((address,uint256)[10])", "[(0x627306090abaB3A6e1400e9345bC60c78a8BEf57,2),(0x527306090ABaB3a6e1400e9345BC60C78A8Bef57,8),(0x0000000000000000000000000000000000000000,0),(0x0000000000000000000000000000000000000000,0),(0x0000000000000000000000000000000000000000,0),(0x0000000000000000000000000000000000000000,0),(0x0000000000000000000000000000000000000000,0),(0x0000000000000000000000000000000000000000,0),(0x0000000000000000000000000000000000000000,0),(0x0000000000000000000000000000000000000000,0)]"];
-      bytes memory distribute_gov_token_tx = vm.ffi(scratchpad);
+      Payout[10] memory payouts;
+      payouts[0] = Payout(address(FIRST_OWNER), 2);
+      payouts[1] = Payout(address(SECOND_OWNER), 8);
+      bytes memory distribute_gov_token_tx = abi.encodeWithSelector(multisig.distribute_governance_token.selector, payouts);
       padded_tx = pad_to_length(distribute_gov_token_tx, DATA_LENGTH);
+
       tx_id = multisig.submit_transaction(address(multisig), 0, padded_tx, uint16(distribute_gov_token_tx.length));
       vm.stopPrank();
       vm.startPrank(FIRST_OWNER);
