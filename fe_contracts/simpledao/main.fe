@@ -163,7 +163,6 @@ contract SimpleDAO {
     }
 
     /// Allows to replace an owner with a new owner. Transaction has to be sent by wallet.
-    /// `update_weights` should be called after calling this. TODO: Maybe remove this API entirely?
     pub fn replace_owner(mut self, mut ctx: Context, owner: address, new_owner: address) {
         self.validate_only_wallet(ctx)
         self.validate_owner_exists(owner)
