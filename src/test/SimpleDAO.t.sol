@@ -21,9 +21,11 @@ function pad_to_length(bytes memory data, uint256 length) pure returns (bytes me
 }
 
 uint16 constant DATA_LENGTH = 1024;
-address constant FIRST_OWNER = 0x627306090abaB3A6e1400e9345bC60c78a8BEf57;
-address constant SECOND_OWNER = 0x527306090ABaB3a6e1400e9345BC60C78A8Bef57;
+address constant ALICE = 0x627306090abaB3A6e1400e9345bC60c78a8BEf57;
+address constant BOB = 0x527306090ABaB3a6e1400e9345BC60C78A8Bef57;
 address constant ZERO_ADDRESS = 0x0000000000000000000000000000000000000000;
+uint256 constant INITIAL_MULTISIG_DAI_BALANCE = 10000;
+
 
 contract SimpleDAOTest is Test {
 
@@ -41,90 +43,102 @@ contract SimpleDAOTest is Test {
 
     function setUp() public {
         Fe.compileIngot("simpledao");
-        address[50] memory owners;
-        owners[0] = FIRST_OWNER;
-        owners[1] = SECOND_OWNER;
-        multisig = ISimpleDAO(Fe.deployContract("SimpleDAO", abi.encode(owners, 2)));
+
+        OwnerWeight[10] memory weights;
+        weights[0] = OwnerWeight(address(ALICE), 2);
+        weights[1] = OwnerWeight(address(BOB), 8);
+        
+        // TODO: WE NEED TO MOVE THIS INTO AN INITIALIZE CALL BECAUSE WE CAN'T DISTRIBUTE TOKENS
+        // BEFOE gov_token_initialize IS CALLED
+        multisig = ISimpleDAO(Fe.deployContract("SimpleDAO"));
         gov_token = IERC20(Fe.deployContract("SnakeToken", abi.encode(address(multisig), 100_000)));
-        // We gave 100_000 $SNAKE to the multisig contract but it is not yet distributed to any owner
-        assertEq(gov_token.balanceOf(address(multisig)), 100_000);
+        multisig.initialize(weights, 50, address(gov_token));
+        // We gave 100_000 $SNAKE to the multisig contract and distributed 10 to Alice and Bob
+        assertEq(gov_token.balanceOf(address(multisig)), 100_000 - 10);
+
+        // Give the multisig some DAI so that we can use it in tests
+        address multisig_address = address(multisig);
+        vm.startPrank(BINANCE_ACCOUNT);
+        IERC20(DAI).transfer(address(multisig), INITIAL_MULTISIG_DAI_BALANCE);
+        assertEq(IERC20(DAI).balanceOf(multisig_address), INITIAL_MULTISIG_DAI_BALANCE);
+        vm.stopPrank();
     }
 
     function testCannotCallAddOwner() public {
       vm.expectRevert();
-      multisig.add_owner(BINANCE_ACCOUNT);
+      multisig.add_owner(BINANCE_ACCOUNT, 0);
     }
 
     function testAddAndRemoveOwner() public {
-      bytes memory data = pad_to_length(hex"4a75e74100000000000000000000000028c6c06298d514db089934071355e5743bf21d60", DATA_LENGTH);
-      vm.startPrank(FIRST_OWNER);
-      address[50] memory existing_owners = multisig.get_owners();
-      assertEq(existing_owners[0], FIRST_OWNER);
-      assertEq(existing_owners[1], SECOND_OWNER);
+      //bytes memory data = pad_to_length(hex"4a75e74100000000000000000000000028c6c06298d514db089934071355e5743bf21d60", DATA_LENGTH);
+      address[10] memory existing_owners = multisig.get_owners();
+      assertEq(existing_owners[0], ALICE);
+      assertEq(existing_owners[1], BOB);
       assertEq(existing_owners[2], ZERO_ADDRESS);
-      assertEq(multisig.get_weight(FIRST_OWNER), 1);
-      assertEq(multisig.get_weight(SECOND_OWNER), 1);
+      assertEq(multisig.get_weight(ALICE), 2);
+      assertEq(multisig.get_weight(BOB), 8);
       assertEq(multisig.get_weight(ZERO_ADDRESS), 0);
-      assertEq(multisig.get_total_weight(), 2);
+      assertEq(multisig.get_total_weight(), 10);
 
-      uint256 tx_id = multisig.submit_transaction(address(multisig), 0, data, 36);
+      vm.startPrank(ALICE);
+      bytes memory add_owner = abi.encodeWithSelector(multisig.add_owner.selector, BINANCE_ACCOUNT, 1);
+      bytes memory padded_tx = pad_to_length(add_owner, DATA_LENGTH);
+      uint256 tx_id = multisig.submit_transaction(address(multisig), 0, padded_tx, uint16(add_owner.length));
       vm.stopPrank();
 
+      vm.startPrank(BOB);
       vm.expectEmit(true, true, true, true);
       emit OwnerAddition(BINANCE_ACCOUNT);
 
-      vm.startPrank(SECOND_OWNER);
       multisig.confirm_transaction(tx_id);
 
-      address[50] memory new_owners = multisig.get_owners();
-      assertEq(new_owners[0], FIRST_OWNER);
-      assertEq(new_owners[1], SECOND_OWNER);
+      address[10] memory new_owners = multisig.get_owners();
+      assertEq(new_owners[0], ALICE);
+      assertEq(new_owners[1], BOB);
       assertEq(new_owners[2], BINANCE_ACCOUNT);
-      assertEq(multisig.get_weight(FIRST_OWNER), 1);
-      assertEq(multisig.get_weight(SECOND_OWNER), 1);
+      assertEq(multisig.get_weight(ALICE), 2);
+      assertEq(multisig.get_weight(BOB), 8);
       assertEq(multisig.get_weight(BINANCE_ACCOUNT), 1);
       assertEq(multisig.get_weight(ZERO_ADDRESS), 0);
-      assertEq(multisig.get_total_weight(), 3);
+      assertEq(multisig.get_total_weight(), 11);
 
       bytes memory data_removal = pad_to_length(hex"f6b9571a00000000000000000000000028c6c06298d514db089934071355e5743bf21d60", DATA_LENGTH);
-      uint256 tx2_id = multisig.submit_transaction(address(multisig), 0, data_removal, 36);
-      vm.stopPrank();
-
-      vm.startPrank(FIRST_OWNER);
       vm.expectEmit(true, true, true, true);
       emit OwnerRemoval(BINANCE_ACCOUNT);
+      // Bob can pull that off because he has 80% voting power
+      multisig.submit_transaction(address(multisig), 0, data_removal, 36);
+      vm.stopPrank();
 
-      multisig.confirm_transaction(tx2_id);
-      assertEq(existing_owners[0], FIRST_OWNER);
-      assertEq(existing_owners[1], SECOND_OWNER);
+      assertEq(existing_owners[0], ALICE);
+      assertEq(existing_owners[1], BOB);
       assertEq(existing_owners[2], ZERO_ADDRESS);
-      assertEq(multisig.get_weight(FIRST_OWNER), 1);
-      assertEq(multisig.get_weight(SECOND_OWNER), 1);
+      assertEq(multisig.get_weight(ALICE), 2);
+      assertEq(multisig.get_weight(BOB), 8);
       assertEq(multisig.get_weight(BINANCE_ACCOUNT), 0);
       assertEq(multisig.get_weight(ZERO_ADDRESS), 0);
-      assertEq(multisig.get_total_weight(), 2);
+      assertEq(multisig.get_total_weight(), 10);
     }
 
     function testReplaceOwner() public {
       bytes memory data = pad_to_length(hex"f097d1de000000000000000000000000527306090abab3a6e1400e9345bc60c78a8bef5700000000000000000000000028c6c06298d514db089934071355e5743bf21d60", DATA_LENGTH);
-      vm.startPrank(FIRST_OWNER);
-      address[50] memory existing_owners = multisig.get_owners();
-      assertEq(existing_owners[0], FIRST_OWNER);
-      assertEq(existing_owners[1], SECOND_OWNER);
+      vm.startPrank(ALICE);
+      address[10] memory existing_owners = multisig.get_owners();
+      assertEq(existing_owners[0], ALICE);
+      assertEq(existing_owners[1], BOB);
       assertEq(existing_owners[2], ZERO_ADDRESS);
 
       uint256 tx_id = multisig.submit_transaction(address(multisig), 0, data, 68);
       vm.stopPrank();
 
       vm.expectEmit(true, true, true, true);
-      emit OwnerRemoval(SECOND_OWNER);
+      emit OwnerRemoval(BOB);
       emit OwnerAddition(BINANCE_ACCOUNT);
 
-      vm.startPrank(SECOND_OWNER);
+      vm.startPrank(BOB);
       multisig.confirm_transaction(tx_id);
 
-      address[50] memory new_owners = multisig.get_owners();
-      assertEq(new_owners[0], FIRST_OWNER);
+      address[10] memory new_owners = multisig.get_owners();
+      assertEq(new_owners[0], ALICE);
       assertEq(new_owners[1], BINANCE_ACCOUNT);
       assertEq(new_owners[2], ZERO_ADDRESS);
     }
@@ -132,7 +146,7 @@ contract SimpleDAOTest is Test {
     function testSubmit() public {
       // Send some DAI to the 0x0 address
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
-      vm.startPrank(FIRST_OWNER);
+      vm.startPrank(ALICE);
       vm.expectEmit(true, true, true, true);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 68);
       emit Submission(tx_id);
@@ -146,14 +160,14 @@ contract SimpleDAOTest is Test {
     function testRevoke() public {
       // Send some DAI to the 0x0 address
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
-      vm.startPrank(FIRST_OWNER);
+      vm.startPrank(ALICE);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 68);
-      address[50] memory confirmations_1 = multisig.get_confirmations(tx_id);
-      assertEq(confirmations_1[0], FIRST_OWNER);
+      address[10] memory confirmations_1 = multisig.get_confirmations(tx_id);
+      assertEq(confirmations_1[0], ALICE);
       vm.expectEmit(true, true, true, true);
       multisig.revoke_confirmation(tx_id);
-      emit Revocation(FIRST_OWNER, tx_id);
-      address[50] memory confirmations_2 = multisig.get_confirmations(tx_id);
+      emit Revocation(ALICE, tx_id);
+      address[10] memory confirmations_2 = multisig.get_confirmations(tx_id);
       assertEq(confirmations_2[0], ZERO_ADDRESS);
     }
 
@@ -167,198 +181,143 @@ contract SimpleDAOTest is Test {
     function testExecuteTx() public {
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
 
-      address multisig_address = address(multisig);
-      vm.startPrank(BINANCE_ACCOUNT);
-      IERC20(DAI).transfer(address(multisig), 10000);
-      uint256 initial_multisig_balance = IERC20(DAI).balanceOf(multisig_address);
-
       vm.expectEmit(true, true, true, true);
-      emit Confirmation(FIRST_OWNER, 0);
+      emit Confirmation(ALICE, 0);
       vm.stopPrank();
-      vm.startPrank(FIRST_OWNER);
+      vm.startPrank(ALICE);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 68);
 
-      address[50] memory confirmations_1 = multisig.get_confirmations(tx_id);
-      assertEq(confirmations_1[0], FIRST_OWNER);
+      address[10] memory confirmations_1 = multisig.get_confirmations(tx_id);
+      assertEq(confirmations_1[0], ALICE);
       assertEq(confirmations_1[1], ZERO_ADDRESS);
 
       vm.expectEmit(true, true, true, true);
-      emit Confirmation(SECOND_OWNER, 0);
+      emit Confirmation(BOB, 0);
       vm.expectEmit(true, true, true, true);
       emit Execution(tx_id);
       vm.stopPrank();
-      vm.startPrank(SECOND_OWNER);
+      vm.startPrank(BOB);
       multisig.confirm_transaction(tx_id);
-      address[50] memory confirmations_2 = multisig.get_confirmations(tx_id);
-      assertEq(confirmations_2[0], FIRST_OWNER);
-      assertEq(confirmations_2[1], SECOND_OWNER);
+      address[10] memory confirmations_2 = multisig.get_confirmations(tx_id);
+      assertEq(confirmations_2[0], ALICE);
+      assertEq(confirmations_2[1], BOB);
       assertEq(confirmations_2[2], ZERO_ADDRESS);
 
-      uint256 second_multisig_balance = IERC20(DAI).balanceOf(multisig_address);
-      assertEq(second_multisig_balance, initial_multisig_balance - 1);
+      uint256 second_multisig_balance = IERC20(DAI).balanceOf(address(multisig));
+      assertEq(second_multisig_balance, INITIAL_MULTISIG_DAI_BALANCE - 1);
 
     }
 
     function testExecutionFails() public {
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
 
-      address multisig_address = address(multisig);
-      vm.startPrank(BINANCE_ACCOUNT);
-      IERC20(DAI).transfer(address(multisig), 10000);
-      uint256 initial_multisig_balance = IERC20(DAI).balanceOf(multisig_address);
-
       vm.expectEmit(true, true, true, true);
-      emit Confirmation(FIRST_OWNER, 0);
+      emit Confirmation(ALICE, 0);
       vm.stopPrank();
-      vm.startPrank(FIRST_OWNER);
+      vm.startPrank(ALICE);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 50); // intentionally use a too small data_length
 
-      address[50] memory confirmations_1 = multisig.get_confirmations(tx_id);
-      assertEq(confirmations_1[0], FIRST_OWNER);
+      address[10] memory confirmations_1 = multisig.get_confirmations(tx_id);
+      assertEq(confirmations_1[0], ALICE);
       assertEq(confirmations_1[1], ZERO_ADDRESS);
 
       vm.expectEmit(true, true, true, true);
-      emit Confirmation(SECOND_OWNER, 0);
+      emit Confirmation(BOB, 0);
       vm.expectEmit(true, true, true, true);
       emit ExecutionFailure(tx_id);
       vm.stopPrank();
-      vm.startPrank(SECOND_OWNER);
+      vm.startPrank(BOB);
       multisig.confirm_transaction(tx_id);
-      address[50] memory confirmations_2 = multisig.get_confirmations(tx_id);
-      assertEq(confirmations_2[0], FIRST_OWNER);
-      assertEq(confirmations_2[1], SECOND_OWNER);
+      address[10] memory confirmations_2 = multisig.get_confirmations(tx_id);
+      assertEq(confirmations_2[0], ALICE);
+      assertEq(confirmations_2[1], BOB);
       assertEq(confirmations_2[2], ZERO_ADDRESS);
 
-      uint256 second_multisig_balance = IERC20(DAI).balanceOf(multisig_address);
-      assertEq(second_multisig_balance, initial_multisig_balance);
+      uint256 second_multisig_balance = IERC20(DAI).balanceOf(address(multisig));
+      assertEq(second_multisig_balance, INITIAL_MULTISIG_DAI_BALANCE);
     }
 
     function testCanNotExecuteUnconfirmedTx() public {
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
 
-      address multisig_address = address(multisig);
-      vm.startPrank(BINANCE_ACCOUNT);
-      IERC20(DAI).transfer(address(multisig), 10000);
-      uint256 initial_multisig_balance = IERC20(DAI).balanceOf(multisig_address);
-
       vm.expectEmit(true, true, true, true);
-      emit Confirmation(FIRST_OWNER, 0);
+      emit Confirmation(ALICE, 0);
 
       vm.stopPrank();
-      vm.startPrank(FIRST_OWNER);
+      vm.startPrank(ALICE);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 68);
 
       multisig.execute_transaction(tx_id);
-      uint256 second_multisig_balance = IERC20(DAI).balanceOf(multisig_address);
+      uint256 second_multisig_balance = IERC20(DAI).balanceOf(address(multisig));
       // Balance is still the same
-      assertEq(second_multisig_balance, initial_multisig_balance);
+      assertEq(second_multisig_balance, INITIAL_MULTISIG_DAI_BALANCE);
     }
 
     function testWeightedExecution() public {
       // Game plan:
 
-      // Give 2 $SNAKE to FIRST_OWNER
-      // Give 8 SNAKE to SECOND_OWNER
+      // Give 2 $SNAKE to ALICE
+      // Give 8 SNAKE to BOB
       // Set treshold to 50 % of the total weight
-      // Show that FIRST OWNER can not execute something without SECOND_OWNER
-      // Show that SECOND OWNER can execute something without FIRST OWNER
-      // Send 3 $SNAKE from SECOND Owner to FIRST OWNER so that both have 5
-      // Show that FIRST OWNER can now execute something alone
+      // Show that ALICE can not execute something without BOB
+      // Show that BOB can execute something without ALICE
+      // Send 3 $SNAKE from BOB to ALICE so that both have 5
+      // Show that ALICE can now execute something alone
       // Set treshold to 60 % of the total weight
-      // Show that FIRST OWNER can not execute something without SECOND_OWNER
-      // Show that SECOND OWNER can not execute something without FIRST OWNER
+      // Show that ALICE can not execute something without BOB
+      // Show that BOB can not execute something without ALICE
 
 
-      bytes memory set_gov_token_tx = abi.encodeWithSelector(multisig.set_governance_token.selector, address(gov_token));
-      bytes memory padded_tx = pad_to_length(set_gov_token_tx, DATA_LENGTH);
+      // Both owners have some $SNAKE now and the treshold is 50 % of the total weight
+      assertEq(gov_token.balanceOf(ALICE), 2);
+      assertEq(gov_token.balanceOf(BOB), 8);
 
-      vm.startPrank(FIRST_OWNER);
-      uint256 tx_id = multisig.submit_transaction(address(multisig), 0, padded_tx, uint16(set_gov_token_tx.length));
-      
+      bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
+      vm.startPrank(ALICE);
+      uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 68);
       vm.stopPrank();
-      vm.startPrank(SECOND_OWNER);
+      // We did not send any DAI because ALICE can not execute txs without BOBS approval
+      assertEq(IERC20(DAI).balanceOf(address(multisig)), INITIAL_MULTISIG_DAI_BALANCE);
+      
+      vm.startPrank(BOB);
       multisig.confirm_transaction(tx_id);
+      // Now we executed the tx because BOB gave his approval
+      assertEq(IERC20(DAI).balanceOf(address(multisig)), 9999);
+      // Now BOB will try to send some DAI without ALICES approval
+      tx_id = multisig.submit_transaction(DAI, 0, data, 68);
+      // The tx was executed without ALICES approval because BOB controls 80 % of the voting power
+      assertEq(IERC20(DAI).balanceOf(address(multisig)), 9998);
+      // Now BOB will send 3 $SNAKE to ALICE so that both have 5
+      gov_token.transfer(ALICE, 3);
+      assertEq(gov_token.balanceOf(ALICE), 5);
+      assertEq(gov_token.balanceOf(BOB), 5);
 
-      Payout[10] memory payouts;
-      payouts[0] = Payout(address(FIRST_OWNER), 2);
-      payouts[1] = Payout(address(SECOND_OWNER), 8);
-      bytes memory distribute_gov_token_tx = abi.encodeWithSelector(multisig.distribute_governance_token.selector, payouts);
-      padded_tx = pad_to_length(distribute_gov_token_tx, DATA_LENGTH);
-
-      tx_id = multisig.submit_transaction(address(multisig), 0, padded_tx, uint16(distribute_gov_token_tx.length));
+      // We still need to update the weights in the wallet to reflect the new balances.
+      // BOB can still pull that off alone since the wallet still sees him as having 80 % of the voting power
+      bytes memory update_weights = abi.encodeWithSelector(multisig.update_weights.selector);
+      bytes memory padded_tx = pad_to_length(update_weights, DATA_LENGTH);
+      tx_id = multisig.submit_transaction(address(multisig), 0, padded_tx, uint16(update_weights.length));
       vm.stopPrank();
-      vm.startPrank(FIRST_OWNER);
+      vm.startPrank(ALICE);
+      // Now Alice tries again to send some DAI without Bobs approval
+      tx_id = multisig.submit_transaction(DAI, 0, data, 68);
+      // This time the tx did go through because both have 50 % of the voting power and can execute txs alone
+      assertEq(IERC20(DAI).balanceOf(address(multisig)), 9997);
+
+      // Now we will set the treshold to 60 % of the total weight. Alice can do that alone.
+      bytes memory change_quorum = abi.encodeWithSelector(multisig.change_quorum.selector, 51);
+      padded_tx = pad_to_length(change_quorum, DATA_LENGTH);
+      tx_id = multisig.submit_transaction(address(multisig), 0, padded_tx, uint16(change_quorum.length));
+
+      // Now Alice tries again to send some DAI without Bobs approval
+      tx_id = multisig.submit_transaction(DAI, 0, data, 68);
+      // This time the tx did NOT go through because the quorum is at 60 %
+      assertEq(IERC20(DAI).balanceOf(address(multisig)), 9997);
+      vm.stopPrank();
+      vm.startPrank(BOB);
+      // Now Bob confirms the tx and it goes through
       multisig.confirm_transaction(tx_id);
-
-//0xFEfC6BAF87cF3684058D62Da40Ff3A795946Ab06::412a30d4(00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000627306090abab3a6e1400e9345bc60c78a8bef570000000000000000000000000000000000000000000000000000000000000002000000000000000000000000527306090abab3a6e1400e9345bc60c78a8bef570000000000000000000000000000000000000000000000000000000000000008)
-
-      // vm.stopPrank();
-      // vm.startPrank(address(multisig));
-      // Payout[2] memory pay = [Payout(0x627306090abaB3A6e1400e9345bC60c78a8BEf57,2),Payout(0x527306090ABaB3a6e1400e9345BC60C78A8Bef57,8)];
-      // multisig.distribute_governance_token(pay);
-      // TODO: Distribution doesn't seem to happen.
-      assertEq(gov_token.balanceOf(FIRST_OWNER), 2);
-
-
-      //assertEq(res, hex"e6b83d14000000000000000000000000627306090abab3a6e1400e9345bc60c78a8bef57");
-      
-      
-      //string memory output = abi.decode(res, (string));
-      //assertEq(output, "0xe6b83d14000000000000000000000000627306090abab3a6e1400e9345bc60c78a8bef57");
-
-
-
-      // Payout[50] memory initial_distribution;
-      // initial_distribution[0] = Payout(FIRST_OWNER, 2);
-      // initial_distribution[1] = Payout(SECOND_OWNER, 8);
-      
-      // bytes memory data = pad_to_length(hex"4a75e74100000000000000000000000028c6c06298d514db089934071355e5743bf21d60", DATA_LENGTH);
-      // vm.startPrank(FIRST_OWNER);
-      // address[50] memory existing_owners = multisig.get_owners();
-      // assertEq(existing_owners[0], FIRST_OWNER);
-      // assertEq(existing_owners[1], SECOND_OWNER);
-      // assertEq(existing_owners[2], ZERO_ADDRESS);
-      // assertEq(multisig.get_weight(FIRST_OWNER), 1);
-      // assertEq(multisig.get_weight(SECOND_OWNER), 1);
-      // assertEq(multisig.get_weight(ZERO_ADDRESS), 0);
-      // assertEq(multisig.get_total_weight(), 2);
-
-      // uint256 tx_id = multisig.submit_transaction(address(multisig), 0, data, 36);
-      // vm.stopPrank();
-
-      // vm.expectEmit(true, true, true, true);
-      // emit OwnerAddition(BINANCE_ACCOUNT);
-
-      // vm.startPrank(SECOND_OWNER);
-      // multisig.confirm_transaction(tx_id);
-
-      // address[50] memory new_owners = multisig.get_owners();
-      // assertEq(new_owners[0], FIRST_OWNER);
-      // assertEq(new_owners[1], SECOND_OWNER);
-      // assertEq(new_owners[2], BINANCE_ACCOUNT);
-      // assertEq(multisig.get_weight(FIRST_OWNER), 1);
-      // assertEq(multisig.get_weight(SECOND_OWNER), 1);
-      // assertEq(multisig.get_weight(BINANCE_ACCOUNT), 1);
-      // assertEq(multisig.get_weight(ZERO_ADDRESS), 0);
-      // assertEq(multisig.get_total_weight(), 3);
-
-      // bytes memory data_removal = pad_to_length(hex"f6b9571a00000000000000000000000028c6c06298d514db089934071355e5743bf21d60", DATA_LENGTH);
-      // uint256 tx2_id = multisig.submit_transaction(address(multisig), 0, data_removal, 36);
-      // vm.stopPrank();
-
-      // vm.startPrank(FIRST_OWNER);
-      // vm.expectEmit(true, true, true, true);
-      // emit OwnerRemoval(BINANCE_ACCOUNT);
-
-      // multisig.confirm_transaction(tx2_id);
-      // assertEq(existing_owners[0], FIRST_OWNER);
-      // assertEq(existing_owners[1], SECOND_OWNER);
-      // assertEq(existing_owners[2], ZERO_ADDRESS);
-      // assertEq(multisig.get_weight(FIRST_OWNER), 1);
-      // assertEq(multisig.get_weight(SECOND_OWNER), 1);
-      // assertEq(multisig.get_weight(BINANCE_ACCOUNT), 0);
-      // assertEq(multisig.get_weight(ZERO_ADDRESS), 0);
-      // assertEq(multisig.get_total_weight(), 2);
+      assertEq(IERC20(DAI).balanceOf(address(multisig)), 9996);
     }
 
 }

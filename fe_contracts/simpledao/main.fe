@@ -6,7 +6,7 @@ use interfaces::ERC20
 // The following implementation is based on the following solidity implementation
 // https://github.com/OpenZeppelin/gnosis-multisig/blob/master/contracts/MultiSigWallet.sol
 
-const MAX_OWNER_COUNT: u8 = 50
+const MAX_OWNER_COUNT: u8 = 10
 const TX_MAX_DATA_SIZE: u256 = 1024
 
 type TransactionData = Array<u8, { TX_MAX_DATA_SIZE }>
@@ -51,9 +51,9 @@ struct OwnerRemoval {
     pub owner: address
 }
 
-struct RequirementChange {
+struct QuorumChange {
     #indexed
-    pub required: u256
+    pub quorum_pct: u256
 }
 
 struct Transaction {
@@ -78,105 +78,73 @@ fn tx_to_buffer(tx: Transaction) -> RawCallBuffer {
     return buf
 }
 
-enum Governance {
-    Multisig
-    WeightedMultisig(ERC20)
-}
-
 contract SimpleDAO {
+    deployer: address
+    initialized: bool
     tx_count: u256
     transactions: Map<u256, Transaction>
     confirmations: Map<u256, Map<address, bool>>
-    required_weight: u256
     owners: AddressArray
     is_owner: Map<address, bool>
     weight: Map<address, u256>
     total_weight: u256
-    governance: Governance
+    gov_token: ERC20
+    quorum_pct: u256
 
-    // Contract constructor sets initial owners and required number of confirmations.
-    pub fn __init__(mut self, ctx: Context, owners: Array<address, { MAX_OWNER_COUNT }>, required_weight: u256) {
+    pub fn __init__(mut self, ctx: Context) {
+        self.deployer = ctx.msg_sender()
+    }
+
+    // Initialize owners with weights, quorum in percantage and governance token
+    pub fn initialize(mut self, ctx: Context, owners: Array<(address, u256), { MAX_OWNER_COUNT }>, quorum_pct: u256, gov_token: ERC20) {
+        assert self.deployer == ctx.msg_sender()
+        assert not self.initialized
+        self.initialized = true
+
         let mut tmp: AddressArray = AddressArray::new()
-        for owner in owners {
-            // TODO: Look into this
+        for pair in owners {
+            let (owner, weight):(address, u256) = pair
             if owner != 0 and not self.is_owner[owner] {
                 tmp.push(owner)
                 self.is_owner[owner] = true
             }
         }
+        self.gov_token = gov_token
+        self._distribute_governance_token(ctx, receivers: owners, quorum_pct: quorum_pct)
         self.owners = tmp
-        self.governance = Governance::Multisig
-        self.required_weight = required_weight
-        self.update_weights(ctx)
+        self._update_weights(ctx)
     }
 
-    /// Set the governance token to be used for weighted multisig mode
-    pub fn set_governance_token(mut self, ctx: Context, gov_token: ERC20) {
-        self.validate_only_wallet(ctx)
-        self.governance = Governance::WeightedMultisig(gov_token)
-        self.update_weights(ctx)
-    }
-
-    /// Distribute governance tokens to the given receivers
+    /// Distribute governance tokens to the given receivers. Since distribute tokens can change effective powers of owners, the
+    /// call is allways required to also update the `quorum_pct` of total weight needed to execute transactions.
     /// For as long as Fe does not support dynamically sized arrays, this is limited to 10 receivers at a time
-    pub fn distribute_governance_token(mut self, ctx: Context, receivers: Array<(address, u256), { 10 }>) {
+    pub fn distribute_governance_token(mut self, ctx: Context, receivers: Array<(address, u256), { MAX_OWNER_COUNT }>, quorum_pct: u256) {
         self.validate_only_wallet(ctx)
-        match self.governance {
-            Governance::Multisig => {
-                revert
-            }
-            Governance::WeightedMultisig(gov_token) => {
-                for pair in receivers {
-                    let (to, amount):(address, u256) = pair
-                    if to != 0 and amount > 0{
-                        gov_token.transfer(to, amount)
-                    }
-                }
-            }
-        }
+        self._distribute_governance_token(ctx, receivers, quorum_pct)
     }
 
+    /// Update the internal weights of owners based on there holdings of the governance token at the time of the API call.
     pub fn update_weights(mut self, ctx: Context) {
-        match self.governance {
-            Governance::Multisig => {
-                self.set_fallback_weights()
-            }
-            Governance::WeightedMultisig(gov_token) => {
-                // TODO: Split this into private and public function
-                //self.validate_only_wallet(ctx)
-                let mut total_weight: u256 = 0
-                for owner in self.owners.to_mem().data() {
-                    if owner == 0 {
-                        continue
-                    }
-                    let owner_balance: u256 = gov_token.balanceOf(owner)
-                    self.weight[owner] = owner_balance
-                    total_weight += owner_balance
-                }
-
-                if total_weight == 0 {
-                    self.set_fallback_weights()
-                } else {
-                    self.total_weight = total_weight
-                }
-            }
-        }
+        self.validate_only_wallet(ctx)
+        self._update_weights(ctx)
     }
 
     /// Allows to add a new owner. Transaction has to be sent by wallet.
-    pub fn add_owner(mut self, mut ctx: Context, owner: address) {
+    pub fn add_owner(mut self, mut ctx: Context, owner: address, distribute_amount: u256) {
         self.validate_only_wallet(ctx)
         self.validate_owner_does_not_exist(owner)
         self.validate_not_null(owner)
-        self.validate_valid_requirement(self.owners.to_mem().length() + 1, self.required_weight)
 
+        if distribute_amount > 0 {
+            self.gov_token.transfer(to: owner, distribute_amount)
+        }
         self.is_owner[owner] = true
         let mut tmp: AddressArray = self.owners.to_mem()
         tmp.push(owner)
         self.owners = tmp
         ctx.emit(OwnerAddition(owner))
         // This would be wasteful if multiple owners were added repeatedly, but we choose safety over gas efficiency
-        self.update_weights(ctx)
+        self._update_weights(ctx)
     }
 
     /// Allows to remove an owner. Transaction has to be sent by wallet.
@@ -188,14 +156,10 @@ contract SimpleDAO {
         let mut tmp: AddressArray = self.owners.to_mem()
         tmp.remove(owner)
 
-        if self.required_weight > tmp.length() {
-            self.change_requirement(ctx, required: tmp.length())
-        }
-
         self.owners = tmp
         ctx.emit(OwnerRemoval(owner))
         // This would be wasteful if multiple owners were removed repeatedly, but we choose safety over gas efficiency
-        self.update_weights(ctx)
+        self._update_weights(ctx)
     }
 
     /// Allows to replace an owner with a new owner. Transaction has to be sent by wallet.
@@ -213,12 +177,13 @@ contract SimpleDAO {
         self.is_owner[new_owner] = true
         ctx.emit(OwnerRemoval(owner))
         ctx.emit(OwnerAddition(owner: new_owner))
+        self._update_weights(ctx)
     }
 
-    /// Allows to change the number of required confirmations. Transaction has to be sent by wallet.
-    pub fn change_requirement(mut self, mut ctx: Context, required: u256) {
-        self.required_weight = required
-        ctx.emit(RequirementChange(required))
+    /// Allows to change the quorum in percentage that is needed to excute transactions. Transaction has to be sent by wallet.
+    pub fn change_quorum(mut self, mut ctx: Context, quorum_pct: u256) {
+        self.quorum_pct = quorum_pct
+        ctx.emit(QuorumChange(quorum_pct))
     }
 
     /// Allows an owner to submit and confirm a transaction.
@@ -282,7 +247,7 @@ contract SimpleDAO {
             if self.confirmations[tx_id][owner] {
                 weight += self.weight[owner]
             }
-            if weight == self.required_weight {
+            if weight * 100 / self.total_weight >= self.quorum_pct {
                 return true
             }
         }
@@ -321,17 +286,35 @@ contract SimpleDAO {
 
     // Internal functions
 
-    // Gives each owner an equal weight of 1
-    fn set_fallback_weights(mut self) {
+    fn _distribute_governance_token(mut self, ctx: Context, receivers: Array<(address, u256), { MAX_OWNER_COUNT }>, quorum_pct: u256) {
+        for pair in receivers {
+            let (to, amount):(address, u256) = pair
+            if to != 0 and amount > 0{
+                self.gov_token.transfer(to, amount)
+            }
+        }
+        self.quorum_pct = quorum_pct
+    }
+
+    fn _update_weights(mut self, ctx: Context) {
         let mut total_weight: u256 = 0
         for owner in self.owners.to_mem().data() {
             if owner == 0 {
                 continue
             }
-            self.weight[owner] = 1
-            total_weight += 1
+            let owner_balance: u256 = self.gov_token.balanceOf(owner)
+            self.weight[owner] = owner_balance
+            total_weight += owner_balance
         }
-        self.total_weight = total_weight
+
+        // Clearly something is wrong here. Could happen if for instance all owners have 0 balance
+        // but in that case it would be better to revert and keep all weights as they are until
+        // the situation is resolved
+        if total_weight == 0 {
+            revert
+        } else {
+            self.total_weight = total_weight
+        }
     }
 
     fn add_transaction(
@@ -406,8 +389,8 @@ contract SimpleDAO {
         }
     }
 
-    fn validate_valid_requirement(self, _ owner_count: u256, _ required: u256) {
-        if owner_count > MAX_OWNER_COUNT or required > self.total_weight or required == 0 or owner_count == 0 {
+    fn validate_valid_requirement(self, _ quorum_pct: u256) {
+        if quorum_pct == 0 or quorum_pct > 100 {
             revert
         }
     }

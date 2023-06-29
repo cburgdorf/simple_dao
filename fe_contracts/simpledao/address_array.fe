@@ -1,5 +1,5 @@
 const ZERO_ADDRESS: address = 0x0000000000000000000000000000000000000000
-const MAX_CAPACITY: u256 = 50
+const MAX_CAPACITY: u256 = 10
 
 pub struct AddressArray {
     array: Array<address, { MAX_CAPACITY }>
