@@ -1,5 +1,5 @@
 use std::buf::{RawCallBuffer, MemoryBufferWriter}
-use address_array::{AddressArray}
+use address_array::{ AddressVec}
 use snake_token::{SnakeToken}
 use interfaces::ERC20
 
@@ -84,7 +84,7 @@ contract SimpleDAO {
     tx_count: u256
     transactions: Map<u256, Transaction>
     confirmations: Map<u256, Map<address, bool>>
-    owners: AddressArray
+    owners: Array<address, { MAX_OWNER_COUNT }>
     is_owner: Map<address, bool>
     weight: Map<address, u256>
     total_weight: u256
@@ -101,7 +101,7 @@ contract SimpleDAO {
         assert not self.initialized
         self.initialized = true
 
-        let mut tmp: AddressArray = AddressArray::new()
+        let mut tmp: Array<address, { MAX_OWNER_COUNT }> = [address(0); MAX_OWNER_COUNT]
         for pair in owners {
             let (owner, weight):(address, u256) = pair
             if owner != 0 and not self.is_owner[owner] {
@@ -109,9 +109,9 @@ contract SimpleDAO {
                 self.is_owner[owner] = true
             }
         }
+        self.owners = tmp
         self.gov_token = gov_token
         self._distribute_governance_token(ctx, receivers: owners, quorum_pct: quorum_pct)
-        self.owners = tmp
         self._update_weights(ctx)
     }
 
@@ -139,9 +139,7 @@ contract SimpleDAO {
             self.gov_token.transfer(to: owner, distribute_amount)
         }
         self.is_owner[owner] = true
-        let mut tmp: AddressArray = self.owners.to_mem()
-        tmp.push(owner)
-        self.owners = tmp
+        self.push_owner(owner)
         ctx.emit(OwnerAddition(owner))
         // This would be wasteful if multiple owners were added repeatedly, but we choose safety over gas efficiency
         self._update_weights(ctx)
@@ -153,10 +151,7 @@ contract SimpleDAO {
         self.validate_owner_exists(owner)
         self.is_owner[owner] = false
         self.weight[owner] = 0
-        let mut tmp: AddressArray = self.owners.to_mem()
-        tmp.remove(owner)
-
-        self.owners = tmp
+        self.delete_owner(owner)
         ctx.emit(OwnerRemoval(owner))
         // This would be wasteful if multiple owners were removed repeatedly, but we choose safety over gas efficiency
         self._update_weights(ctx)
@@ -167,10 +162,8 @@ contract SimpleDAO {
         self.validate_only_wallet(ctx)
         self.validate_owner_exists(owner)
         self.validate_owner_does_not_exist(new_owner)
-        let mut tmp: AddressArray = self.owners.to_mem()
-        tmp.remove(owner)
-        tmp.push(new_owner)
-        self.owners = tmp
+        self.delete_owner(owner)
+        self.push_owner(new_owner)
         self.is_owner[owner] = false
         self.weight[owner] = 0
         self.is_owner[new_owner] = true
@@ -242,7 +235,7 @@ contract SimpleDAO {
     /// Returns the confirmation status of a transaction.
     pub fn is_confirmed(self, tx_id: u256) -> bool {
         let mut weight: u256 = 0
-        for owner in self.owners.to_mem().data() {
+        for owner in self.owners.to_mem() {
             if self.confirmations[tx_id][owner] {
                 weight += self.weight[owner]
             }
@@ -257,7 +250,7 @@ contract SimpleDAO {
 
     /// Returns list of owners
     pub fn get_owners(self) -> Array<address, { MAX_OWNER_COUNT }> {
-        return self.owners.to_mem().data()
+        return self.owners.to_mem()
     }
 
     /// Returns the weight of the owner
@@ -274,7 +267,7 @@ contract SimpleDAO {
     pub fn get_confirmations(self, tx_id: u256) -> Array<address, { MAX_OWNER_COUNT }> {
         let mut confirmations: Array<address, { MAX_OWNER_COUNT }> = [address(0); MAX_OWNER_COUNT]
         let mut i_match: u256 = 0
-        for owner in self.owners.to_mem().data() {
+        for owner in self.owners.to_mem() {
             if self.confirmations[tx_id][owner] {
                 confirmations[i_match] = owner
                 i_match += 1
@@ -297,7 +290,7 @@ contract SimpleDAO {
 
     fn _update_weights(mut self, ctx: Context) {
         let mut total_weight: u256 = 0
-        for owner in self.owners.to_mem().data() {
+        for owner in self.owners.to_mem() {
             if owner == 0 {
                 continue
             }
@@ -336,6 +329,19 @@ contract SimpleDAO {
         self.tx_count += 1
         ctx.emit(Submission(tx_id))
         return tx_id
+    }
+
+    // These are only needed because we manually have to load the array in memory and then re-store it
+    fn push_owner(mut self, _ owner: address) {
+        let mut tmp: Array<address, { MAX_OWNER_COUNT }> = self.owners.to_mem()
+        tmp.push(owner)
+        self.owners = tmp
+    }
+
+    fn delete_owner(mut self, _ owner: address) {
+        let mut tmp: Array<address, { MAX_OWNER_COUNT }> = self.owners.to_mem()
+        tmp.remove(owner)
+        self.owners = tmp
     }
 
     // Internal validation methods
