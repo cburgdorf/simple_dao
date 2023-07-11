@@ -39,6 +39,8 @@ This DAO uses a very simple implicit snapshot mechanism to safeguard against dou
 
 ## Caveats
 
+1. Holding governance tokens does not *automatically* grant voting rights. The DAO needs to explicitly add members and if they decide to not add someone, they can't vote even if they hold tokens.
+
 
 # Prerequisite
 # Installation / Setup
@@ -51,7 +53,12 @@ Set up an environment variable `MAINNET_JSON_RPC` to point to a mainnet node. Fo
 
 # Run the tests
 
+## Foundry tests using solidity
+
 We fork from mainnet to pull some DAI and other things into our test environment.
 
 Run `forge test --fork-url $MAINNET_JSON_RPC`
 
+## Fe tests
+
+Run `$FE_PATH test fe_contracts/simpledao/`
