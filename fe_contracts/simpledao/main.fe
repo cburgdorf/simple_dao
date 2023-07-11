@@ -97,6 +97,7 @@ contract SimpleDAO {
 
     // Initialize owners with weights, quorum in percantage and governance token
     pub fn initialize(mut self, ctx: Context, owners: Array<(address, u256), { MAX_OWNER_COUNT }>, quorum_pct: u256, gov_token: ERC20) {
+        // Making sure this can only be called once by the account that deployed the contract
         assert self.deployer == ctx.msg_sender()
         assert not self.initialized
         self.initialized = true
@@ -141,7 +142,6 @@ contract SimpleDAO {
         self.is_owner[owner] = true
         self.push_owner(owner)
         ctx.emit(OwnerAddition(owner))
-        // This would be wasteful if multiple owners were added repeatedly, but we choose safety over gas efficiency
         self._update_weights(ctx)
     }
 
@@ -153,7 +153,6 @@ contract SimpleDAO {
         self.weight[owner] = 0
         self.delete_owner(owner)
         ctx.emit(OwnerRemoval(owner))
-        // This would be wasteful if multiple owners were removed repeatedly, but we choose safety over gas efficiency
         self._update_weights(ctx)
     }
 
@@ -289,6 +288,9 @@ contract SimpleDAO {
     }
 
     fn _update_weights(mut self, ctx: Context) {
+        // We call this from different places such as `add_owner` and `remove_owner` which also means
+        // we might be wasting gas if it ends up being called repeatedly. We choose safety over gas efficiency.
+        // In the future we might add `batch_add_owner` and `batch_remove_owner` to mitigate this.
         let mut total_weight: u256 = 0
         for owner in self.owners.to_mem() {
             if owner == 0 {
