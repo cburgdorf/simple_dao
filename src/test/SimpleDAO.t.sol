@@ -148,12 +148,12 @@ contract SimpleDAOTest is Test {
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
       vm.startPrank(ALICE);
       vm.expectEmit(true, true, true, true);
+      emit Submission(0);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 68);
-      emit Submission(tx_id);
       assertEq(tx_id, 0);
       vm.expectEmit(true, true, true, true);
+      emit Submission(1);
       uint256 second_tx_id = multisig.submit_transaction(DAI, 0, data, 68);
-      emit Submission(second_tx_id);
       assertEq(second_tx_id, 1);
     }
 
@@ -165,8 +165,8 @@ contract SimpleDAOTest is Test {
       address[10] memory confirmations_1 = multisig.get_confirmations(tx_id);
       assertEq(confirmations_1[0], ALICE);
       vm.expectEmit(true, true, true, true);
-      multisig.revoke_confirmation(tx_id);
       emit Revocation(ALICE, tx_id);
+      multisig.revoke_confirmation(tx_id);
       address[10] memory confirmations_2 = multisig.get_confirmations(tx_id);
       assertEq(confirmations_2[0], ZERO_ADDRESS);
     }
@@ -181,22 +181,21 @@ contract SimpleDAOTest is Test {
     function testExecuteTx() public {
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
 
+      vm.startPrank(ALICE);
       vm.expectEmit(true, true, true, true);
       emit Confirmation(ALICE, 0);
-      vm.stopPrank();
-      vm.startPrank(ALICE);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 68);
 
       address[10] memory confirmations_1 = multisig.get_confirmations(tx_id);
       assertEq(confirmations_1[0], ALICE);
       assertEq(confirmations_1[1], ZERO_ADDRESS);
 
+      vm.stopPrank();
+      vm.startPrank(BOB);
       vm.expectEmit(true, true, true, true);
       emit Confirmation(BOB, 0);
       vm.expectEmit(true, true, true, true);
       emit Execution(tx_id);
-      vm.stopPrank();
-      vm.startPrank(BOB);
       multisig.confirm_transaction(tx_id);
       address[10] memory confirmations_2 = multisig.get_confirmations(tx_id);
       assertEq(confirmations_2[0], ALICE);
@@ -211,22 +210,21 @@ contract SimpleDAOTest is Test {
     function testExecutionFails() public {
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
 
+      vm.startPrank(ALICE);
       vm.expectEmit(true, true, true, true);
       emit Confirmation(ALICE, 0);
-      vm.stopPrank();
-      vm.startPrank(ALICE);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 50); // intentionally use a too small data_length
 
       address[10] memory confirmations_1 = multisig.get_confirmations(tx_id);
       assertEq(confirmations_1[0], ALICE);
       assertEq(confirmations_1[1], ZERO_ADDRESS);
 
+      vm.stopPrank();
+      vm.startPrank(BOB);
       vm.expectEmit(true, true, true, true);
       emit Confirmation(BOB, 0);
       vm.expectEmit(true, true, true, true);
       emit ExecutionFailure(tx_id);
-      vm.stopPrank();
-      vm.startPrank(BOB);
       multisig.confirm_transaction(tx_id);
       address[10] memory confirmations_2 = multisig.get_confirmations(tx_id);
       assertEq(confirmations_2[0], ALICE);
@@ -239,12 +237,10 @@ contract SimpleDAOTest is Test {
 
     function testCanNotExecuteUnconfirmedTx() public {
       bytes memory data = pad_to_length(hex"a9059cbb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", DATA_LENGTH);
-
+      vm.startPrank(ALICE);
       vm.expectEmit(true, true, true, true);
       emit Confirmation(ALICE, 0);
 
-      vm.stopPrank();
-      vm.startPrank(ALICE);
       uint256 tx_id = multisig.submit_transaction(DAI, 0, data, 68);
 
       multisig.execute_transaction(tx_id);
