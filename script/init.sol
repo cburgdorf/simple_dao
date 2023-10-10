@@ -8,7 +8,10 @@ import '../src/ISimpleDAO.sol';
 
 
 // Invoke this with ENV vars initialized. Here's an example with local test accounts:
-// OWNER_0=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 OWNER_0_WEIGHT=2 PCT=50 GOV_ADDRESS=0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9 DAO_ADDRESS=0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0 DEPLOYER_PK=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80  forge script script/init.sol  --fork-url http://localhost:8545 --broadcast
+// OWNER_0=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 OWNER_0_WEIGHT=2 PCT=50 GOV_ADDRESS=0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9 DAO_ADDRESS=0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0 DEPLOYER_ADDRESS=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266  forge script script/init.sol  --fork-url http://localhost:8545 --broadcast --private-key=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+
+// Please note that for production we would pass --ledger instead of --private-key.
+// That is also why the `startBroadcast` is based on the `DEPLOYER_ADDRESS`, independent of a private key.
 
 contract MyScript is Script {
     function run() external {
@@ -29,7 +32,7 @@ contract MyScript is Script {
 
         ISimpleDAO dao = ISimpleDAO(vm.envAddress("DAO_ADDRESS"));
 
-        vm.startBroadcast(vm.envUint("DEPLOYER_PK"));
+        vm.startBroadcast(vm.envAddress("DEPLOYER_ADDRESS"));
         dao.initialize(weights, vm.envUint("PCT"), vm.envAddress("GOV_ADDRESS"));
         vm.stopBroadcast();
     }
