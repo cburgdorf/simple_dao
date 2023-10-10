@@ -62,3 +62,16 @@ Run `forge test --fork-url $MAINNET_JSON_RPC`
 ## Fe tests
 
 Run `$FE_PATH test fe_contracts/simpledao/`
+
+## Deployment
+
+Scripts exist in the `scripts` folder to assist with the deployment. The scripts are written in a way to work with
+local, test or production networks and can hence be used with different kind of wallet options (e.g. private key, mnemonic, hardware wallet, etc.).
+
+1. Run `deploy.sh` with the instructions at the head of the file to deploy the DAO contract and the governance token.
+
+2. Run `init.sol` with the instructions at the head of the file to initialize the DAO with a set of founding members and their token allocation.
+
+## Usage
+
+There does not exist a frontent yet and best practices for interacting with the DAO are still being explored. The rough idea is that each proposed tx would first need to be written as a script for everyone to screen and for the bytecode to be verified and to be later compared with the bytecode of the tx that gets proposed. This is to ensure that the tx that gets proposed is the same as the tx that was written and reviewed. The DAO would then propose the tx and members would need to confirm it. Once the quorum is reached, the DAO would execute the tx.
