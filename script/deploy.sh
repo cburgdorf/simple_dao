@@ -15,7 +15,7 @@ dao_address=$(echo $dao_deploy_response | jq -r '.contractAddress')
 # Now you can use the $dao_address variable
 echo "DAO is deployed at: $dao_address"
 
-gov_deploy_resonse=$(cast send --json $SEND_OPT --create $(cat output/SnakeToken/SnakeToken.bin) $(cast abi-encode "__init__(address,uint256)" $dao_address 100000))
+gov_deploy_resonse=$(cast send --json $SEND_OPT --create $(cat output/SimpleDaoGovToken/SimpleDaoGovToken.bin) $(cast abi-encode "__init__(address,uint256)" $dao_address 100000))
 
 gov_address=$(echo $gov_deploy_resonse | jq -r '.contractAddress')
 

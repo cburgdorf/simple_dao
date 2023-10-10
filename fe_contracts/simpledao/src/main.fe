@@ -1,6 +1,6 @@
 use std::buf::{RawCallBuffer, MemoryBufferWriter}
 use address_array::{ AddressVec}
-use snake_token::{SnakeToken}
+use governance::{SimpleDaoGovToken}
 use interfaces::ERC20
 
 // The following implementation is based on the following solidity implementation

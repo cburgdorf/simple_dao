@@ -14,7 +14,7 @@ struct Transfer {
     pub value: u256
 }
 
-pub contract SnakeToken {
+pub contract SimpleDaoGovToken {
     _balances: Map<address, u256>
     _allowances: Map<address, Map<address, u256>>
     _total_supply: u256
@@ -23,8 +23,8 @@ pub contract SnakeToken {
     _decimals: u8
 
     pub fn __init__(mut self, mut ctx: Context, receiver: address, amount: u256) {
-        self._name = "SnakeCharmes Fund"
-        self._symbol = "SNAKE"
+        self._name = "SimpleDAO Governance Token"
+        self._symbol = "SGOV"
         self._decimals = u8(18)
         self._mint(ctx, account: receiver, value: amount)
     }
