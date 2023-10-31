@@ -82,7 +82,7 @@ For straightforward transactions, we can use the *dry run* option of the `submit
 
 ### Example 
 
-Consider [this transaction](https://etherscan.io/tx/0x53b8b5a3153afd7c7c17a815337e6c37a1d92347476a7ef15be27e67890a128b) invoking the `deposit()` function on the rocket pool deposit contract with a value of `100000000000000000`` WEI (`0.1`` ETH).
+Consider [this transaction](https://etherscan.io/tx/0x53b8b5a3153afd7c7c17a815337e6c37a1d92347476a7ef15be27e67890a128b) invoking the `deposit()` function on the rocket pool deposit contract with a value of `100000000000000000` WEI (`0.1` ETH).
 
 #### Calculate hash of proposed transaction
 
