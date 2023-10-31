@@ -14,13 +14,22 @@ import './util.sol';
 
 contract MyScript is Script {
     function run() external {
-        
-        ISimpleDAO dao = ISimpleDAO(vm.envAddress("DAO_ADDRESS"));
 
         bytes memory data = vm.envOr("DATA", bytes(""));
         uint16 data_length = uint16(data.length);
         bytes memory padded_data = pad_to_length(data, DATA_LENGTH);
 
+        if (vm.envOr("DRY", false)) {
+            console.log("Dry run, not submitting transaction");
+            bytes memory tx_bytes = abi.encodeWithSelector(ISimpleDAO.submit_transaction.selector, vm.envAddress("TO"), vm.envUint("WEI"), padded_data, data_length);
+            console.log("Transaction bytes:");
+            console.logBytes(tx_bytes);
+            console.log("keccak(transaction bytes):");
+            console.logBytes32(keccak256(tx_bytes));
+            return;
+        }
+
+        ISimpleDAO dao = ISimpleDAO(vm.envAddress("DAO_ADDRESS"));
         vm.startBroadcast(vm.envAddress("USER_ADDRESS"));
         uint256 tx_id = dao.submit_transaction(vm.envAddress("TO"), vm.envUint("WEI"), padded_data, data_length);
         vm.stopBroadcast();
